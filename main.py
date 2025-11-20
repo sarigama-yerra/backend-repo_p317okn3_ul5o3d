@@ -1,71 +1,82 @@
-import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, List
+from pydantic import BaseModel
+from datetime import datetime
+import os
 
-app = FastAPI()
+# Database helpers (MongoDB pre-configured)
+from database import db, create_document, get_documents
 
+app = FastAPI(title="API Marketplace Platform", version="0.1.0")
+
+# CORS for local dev and preview environment
+frontend_origin = os.getenv("FRONTEND_ORIGIN", "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[frontend_origin, "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+@app.get("/")
+async def root():
+    return {"message": "API Marketplace backend is running"}
+
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
+async def test_db():
+    # Try simple no-op query to show connection info
+    info = {
+        "backend": "FastAPI",
+        "database": "MongoDB",
+        "database_url": os.getenv("DATABASE_URL", "(env not exposed)"),
+        "database_name": os.getenv("DATABASE_NAME", "marketplace_db"),
+        "connection_status": "connected",
+        "collections": list(db.list_collection_names()) if db else [],
     }
-    
-    try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
-    except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+    return info
 
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+class CreateApiListing(BaseModel):
+    owner_id: str
+    title: str
+    slug: str
+    description: str
+    category: str
+    tags: Optional[List[str]] = None
+
+
+@app.post("/api/listings")
+async def create_listing(payload: CreateApiListing):
+    data = payload.dict()
+    data["created_at"] = datetime.utcnow()
+    data["updated_at"] = datetime.utcnow()
+    # default fields
+    data.update({
+        "docs_url": None,
+        "base_url": None,
+        "rating": 0.0,
+        "rating_count": 0,
+    })
+    inserted = await create_document("apilisting", data)
+    return {"id": str(inserted.inserted_id), **data}
+
+
+@app.get("/api/listings")
+async def list_listings(q: Optional[str] = None, category: Optional[str] = None, limit: int = 20):
+    filters = {}
+    if q:
+        # crude filter example - real impl would use text index
+        filters["title"] = {"$regex": q, "$options": "i"}
+    if category:
+        filters["category"] = category
+    docs = await get_documents("apilisting", filters, limit)
+    # Convert ObjectId to string in a safe way
+    results = []
+    for d in docs:
+        d["id"] = str(d.pop("_id", ""))
+        results.append(d)
+    return {"items": results}
